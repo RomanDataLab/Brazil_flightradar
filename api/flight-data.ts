@@ -58,6 +58,10 @@ export default async function handler(req: any, res: any) {
 
           const flightData = typeof data === 'string' ? JSON.parse(data) : data;
           
+          // Add cache headers
+          res.setHeader('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
+          res.setHeader('ETag', `"${timestamp || '0'}"`); // ETag for conditional requests
+          
           return res.status(200).json({
             success: true,
             data: flightData,
@@ -70,6 +74,8 @@ export default async function handler(req: any, res: any) {
       }
 
       // Fallback: return null (client will use static file)
+      // Add cache headers to reduce repeated calls
+      res.setHeader('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
       return res.status(200).json({
         success: true,
         data: null,

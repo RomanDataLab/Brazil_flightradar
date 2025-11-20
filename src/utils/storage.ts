@@ -171,7 +171,17 @@ export async function saveFlightDataToVercel(data: FlightData): Promise<boolean>
 
 export async function loadFlightDataFromVercel(): Promise<FlightData | null> {
   try {
-    const response = await fetch('/api/flight-data');
+    // Only try once per session - cache the result
+    const cacheKey = 'vercel_storage_checked';
+    if (sessionStorage.getItem(cacheKey)) {
+      return null; // Already checked this session
+    }
+    
+    const response = await fetch('/api/flight-data', {
+      cache: 'no-cache' // Force fresh check, but respect 304
+    });
+    
+    sessionStorage.setItem(cacheKey, 'true'); // Mark as checked
     
     if (!response.ok) {
       return null;

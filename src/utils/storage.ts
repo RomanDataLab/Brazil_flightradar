@@ -16,11 +16,18 @@ export function saveFlightData(data: FlightData): void {
       return;
     }
     
+    // Save to localStorage first (immediate)
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     localStorage.setItem(STORAGE_TIMESTAMP_KEY, Date.now().toString());
     // Reset API failure count on successful save
     localStorage.removeItem(STORAGE_API_FAILURE_KEY);
-    console.log(`💾 Saved ${data.states.length} aircraft to cache`);
+    console.log(`💾 Saved ${data.states.length} aircraft to local cache`);
+    
+    // Also save to Vercel in the background (non-blocking)
+    saveFlightDataToVercel(data).catch(err => {
+      // Silently fail - Vercel sync is optional
+      console.debug('Vercel sync failed (non-critical):', err);
+    });
   } catch (error) {
     console.error('❌ Error saving flight data:', error);
     // If storage is full, try to clear old data
@@ -31,6 +38,8 @@ export function saveFlightData(data: FlightData): void {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
         localStorage.setItem(STORAGE_TIMESTAMP_KEY, Date.now().toString());
         console.log('✅ Successfully saved after clearing old data');
+        // Try Vercel sync again
+        saveFlightDataToVercel(data).catch(() => {});
       } catch (retryError) {
         console.error('❌ Still unable to save after clearing:', retryError);
       }
@@ -124,6 +133,60 @@ export async function loadStaticFlightData(): Promise<FlightData | null> {
     return null;
   } catch (error) {
     console.warn('⚠️ Could not load static flight data:', error);
+    return null;
+  }
+}
+
+// Vercel storage functions - sync with serverless API
+export async function saveFlightDataToVercel(data: FlightData): Promise<boolean> {
+  try {
+    if (!data || !data.states || data.states.length === 0) {
+      return false;
+    }
+
+    const response = await fetch('/api/flight-data', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        time: data.time,
+        states: data.states
+      })
+    });
+
+    if (response.ok) {
+      await response.json(); // Acknowledge response
+      console.log(`☁️ Saved ${data.states.length} aircraft to Vercel storage`);
+      return true;
+    } else {
+      console.warn('⚠️ Failed to save to Vercel:', response.status);
+      return false;
+    }
+  } catch (error) {
+    console.warn('⚠️ Error saving to Vercel (non-critical):', error);
+    return false; // Don't throw - this is a background sync
+  }
+}
+
+export async function loadFlightDataFromVercel(): Promise<FlightData | null> {
+  try {
+    const response = await fetch('/api/flight-data');
+    
+    if (!response.ok) {
+      return null;
+    }
+
+    const result = await response.json();
+    
+    if (result.success && result.data && result.data.states && Array.isArray(result.data.states)) {
+      console.log(`☁️ Loaded ${result.data.states.length} aircraft from Vercel storage`);
+      return result.data;
+    }
+    
+    return null;
+  } catch (error) {
+    console.warn('⚠️ Could not load from Vercel:', error);
     return null;
   }
 }

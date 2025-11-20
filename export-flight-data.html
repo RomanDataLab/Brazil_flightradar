@@ -47,13 +47,13 @@
     </ol>
   </div>
 
-  <button onclick="exportData()">Export Flight Data</button>
+  <button onclick="exportData()">Export & Upload to Vercel</button>
   <button onclick="clearData()">Clear LocalStorage</button>
   
   <div id="output"></div>
 
   <script>
-    function exportData() {
+    async function exportData() {
       try {
         const data = localStorage.getItem('opensky_flight_data');
         const timestamp = localStorage.getItem('opensky_flight_timestamp');
@@ -69,7 +69,27 @@
           states: flightData.states || []
         };
 
-        // Create download
+        // Try to upload to Vercel first
+        let uploadSuccess = false;
+        try {
+          const uploadResponse = await fetch('/api/flight-data', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(exportData)
+          });
+
+          if (uploadResponse.ok) {
+            uploadSuccess = true;
+            const result = await uploadResponse.json();
+            console.log('Uploaded to Vercel:', result);
+          }
+        } catch (uploadError) {
+          console.warn('Could not upload to Vercel:', uploadError);
+        }
+
+        // Also create download
         const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -80,15 +100,20 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
+        const uploadStatus = uploadSuccess 
+          ? '<p style="color: green;">✅ <strong>Uploaded to Vercel storage!</strong></p>'
+          : '<p style="color: orange;">⚠️ Could not upload to Vercel (KV may not be configured). File downloaded instead.</p>';
+
         document.getElementById('output').innerHTML = `
           <h3>✅ Export Successful!</h3>
+          ${uploadStatus}
           <p>Downloaded: <code>flight-data-fallback.json</code></p>
           <p>Aircraft count: ${exportData.states.length}</p>
           <p><strong>Next steps:</strong></p>
           <ol>
-            <li>Rename the downloaded file to <code>flight-data-fallback.json</code></li>
-            <li>Copy it to the <code>public/</code> folder in your project</li>
+            ${uploadSuccess ? '<li>✅ Data uploaded to Vercel storage</li>' : '<li>Copy the downloaded file to <code>public/flight-data-fallback.json</code></li>'}
             <li>Commit and push to GitHub</li>
+            ${!uploadSuccess ? '<li>Set up Vercel KV for persistent storage (see STORAGE_SETUP.md)</li>' : ''}
           </ol>
           <h4>Preview:</h4>
           <pre>${JSON.stringify(exportData, null, 2).substring(0, 500)}...</pre>

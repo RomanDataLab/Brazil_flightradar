@@ -6,7 +6,7 @@ import { IconLayer } from '@deck.gl/layers';
 import { Map } from 'react-map-gl/maplibre';
 import { loadCredentials, getAuthHeader } from './utils/credentials';
 import { fetchBrazilFlights, DATA_INDEX } from './api/opensky';
-import { saveFlightData, loadFlightData, loadFlightDataEmergency, recordApiFailure, loadStaticFlightData } from './utils/storage';
+import { saveFlightData, loadFlightData, loadFlightDataEmergency, recordApiFailure, loadStaticFlightData, loadFlightDataFromVercel } from './utils/storage';
 import { fetchAirports, Airport } from './utils/airports';
 import { fetchAirlines, Airline } from './utils/airlines';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -129,6 +129,12 @@ function App() {
       if (!cachedData || !cachedData.states || cachedData.states.length === 0) {
         console.log('🔄 Normal cache expired, trying emergency fallback...');
         cachedData = loadFlightDataEmergency();
+      }
+      
+      // If still no cached data, try Vercel storage
+      if (!cachedData || !cachedData.states || cachedData.states.length === 0) {
+        console.log('🔄 No cached data, trying Vercel storage...');
+        cachedData = await loadFlightDataFromVercel();
       }
       
       // If still no cached data, try static fallback file

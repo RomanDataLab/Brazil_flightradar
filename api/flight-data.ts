@@ -16,19 +16,8 @@ try {
 const FLIGHT_DATA_KEY = 'flight_data';
 const FLIGHT_DATA_TIMESTAMP_KEY = 'flight_data_timestamp';
 
-// File-based storage fallback (stored in public folder)
-// This is a workaround until Vercel KV is set up
-async function saveToFile(data: any): Promise<void> {
-  // Note: Serverless functions can't write to filesystem
-  // This would require a different approach or Vercel KV
-  console.log('File-based storage not available in serverless functions');
-}
-
-async function loadFromFile(): Promise<any> {
-  // Note: Serverless functions can't read from filesystem reliably
-  // This would require a different approach or Vercel KV
-  return null;
-}
+// File-based storage fallback removed - not possible in serverless functions
+// Use Vercel KV or static files instead
 
 export default async function handler(req: any, res: any) {
   // Handle CORS

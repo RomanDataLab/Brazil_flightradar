@@ -1,7 +1,19 @@
 // Vercel serverless function using Vercel KV for persistent storage
 // To use this, install @vercel/kv and set up Vercel KV in your project
+// This file is optional - only used if @vercel/kv is installed
 
-import { kv } from '@vercel/kv';
+// @ts-ignore - Optional dependency, may not be installed
+let kv: any = null;
+let useKV = false;
+
+try {
+  // @ts-ignore
+  kv = require('@vercel/kv');
+  useKV = true;
+} catch (e) {
+  // KV not installed - this is optional
+  useKV = false;
+}
 
 const FLIGHT_DATA_KEY = 'flight_data';
 const FLIGHT_DATA_TIMESTAMP_KEY = 'flight_data_timestamp';
@@ -14,6 +26,14 @@ export default async function handler(req: any, res: any) {
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
+  }
+
+  if (!useKV || !kv) {
+    return res.status(503).json({
+      success: false,
+      error: 'Vercel KV not configured',
+      message: 'Install @vercel/kv and configure Vercel KV to use this endpoint'
+    });
   }
 
   try {

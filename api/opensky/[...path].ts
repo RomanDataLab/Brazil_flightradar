@@ -38,8 +38,16 @@ export default async function handler(req: any, res: any) {
       'User-Agent': 'Brazil-Flight-Tracker/1.0'
     };
 
-    // Forward authorization header if present
-    if (req.headers.authorization) {
+    // Check for credentials from environment variables (Vercel)
+    const openskyUsername = process.env.OPENSKY_USERNAME;
+    const openskyPassword = process.env.OPENSKY_PASSWORD;
+    
+    // Use environment variables if available, otherwise use forwarded header
+    if (openskyUsername && openskyPassword) {
+      const auth = Buffer.from(`${openskyUsername}:${openskyPassword}`).toString('base64');
+      headers['Authorization'] = `Basic ${auth}`;
+    } else if (req.headers.authorization) {
+      // Fallback to forwarded authorization header
       headers['Authorization'] = req.headers.authorization;
     }
 

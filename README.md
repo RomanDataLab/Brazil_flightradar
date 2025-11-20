@@ -64,6 +64,35 @@ If you have OpenSky Network credentials, you can add them as environment variabl
 
 Or create a `public/credentials.json` file locally (this file is gitignored).
 
+## Configuration
+
+The app is configured to show:
+- **Region:** Brazil (bounded by coordinates: -33.75° to 5.27° latitude, -73.99° to -34.79° longitude)
+- **Update Interval:** Every 5 minutes
+- **Aircraft Filter:** Only aircraft in the air (altitude > 50m, not on ground)
+
+## OpenSky API
+
+This project uses the OpenSky Network API to fetch flight data. The API provides:
+- Real-time and historical flight tracking data
+- Flight information including origin, destination, and timestamps
+
+**API Endpoints Used:**
+- `/api/states/all?lamin={lat}&lomin={lon}&lamax={lat}&lomax={lon}` - Real-time aircraft states in bounding box
+
+**Authentication:**
+- Uses HTTP Basic Authentication with username and password
+- Credentials are loaded from `public/credentials.json`
+- Without credentials, API calls are anonymous (limited access)
+
+**Note:** 
+- If the API request fails or returns no data, the app will display cached data for demonstration purposes.
+- Historical data requires authentication and is processed nightly
+- Time interval must be smaller than 7 days for airport queries
+- For production use, consider using environment variables or a backend proxy to keep credentials secure.
+
+See [OPENSKY_API_GUIDE.md](./OPENSKY_API_GUIDE.md) for detailed connection instructions.
+
 ## Project Structure
 
 ```
@@ -79,4 +108,3 @@ Or create a `public/credentials.json` file locally (this file is gitignored).
 ## License
 
 MIT
-

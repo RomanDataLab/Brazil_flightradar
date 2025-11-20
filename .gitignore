@@ -32,6 +32,7 @@ yarn-error.log*
 
 # Credentials (keep structure but ignore actual credentials)
 public/credentials.json
+credentials.json
 
 # Temporary files
 *.tmp
@@ -40,4 +41,3 @@ public/credentials.json
 # Video recordings
 *.mp4
 1763649114411/
-

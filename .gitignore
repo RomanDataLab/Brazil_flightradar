@@ -37,3 +37,7 @@ public/credentials.json
 *.tmp
 *.temp
 
+# Video recordings
+*.mp4
+1763649114411/
+

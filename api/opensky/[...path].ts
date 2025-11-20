@@ -8,10 +8,16 @@ export default async function handler(req: any, res: any) {
   }
 
   // Get the path from the catch-all route
-  const path = Array.isArray(req.query.path) 
-    ? req.query.path.join('/') 
-    : req.query.path || '';
-
+  // In Vercel, catch-all routes are in req.query with the parameter name
+  let path = '';
+  if (req.query.path) {
+    if (Array.isArray(req.query.path)) {
+      path = req.query.path.join('/');
+    } else {
+      path = req.query.path as string;
+    }
+  }
+  
   // Build the OpenSky API URL
   const openskyUrl = `https://opensky-network.org/api/${path}`;
   
@@ -22,6 +28,9 @@ export default async function handler(req: any, res: any) {
       const value = req.query[key];
       if (typeof value === 'string') {
         queryParams[key] = value;
+      } else if (Array.isArray(value) && value.length > 0) {
+        // Take first value if array
+        queryParams[key] = value[0] as string;
       }
     }
   });
@@ -30,6 +39,10 @@ export default async function handler(req: any, res: any) {
   const fullUrl = queryString 
     ? `${openskyUrl}?${queryString}` 
     : openskyUrl;
+  
+  console.log(`[OpenSky Proxy] Request: ${req.method} ${req.url}`);
+  console.log(`[OpenSky Proxy] Path: ${path}`);
+  console.log(`[OpenSky Proxy] Full URL: ${fullUrl}`);
 
   try {
     // Prepare headers

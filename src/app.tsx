@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import DeckGL from '@deck.gl/react';
 import { ScenegraphLayer } from '@deck.gl/mesh-layers';
-import { IconLayer, ScatterplotLayer } from '@deck.gl/layers';
+import { IconLayer } from '@deck.gl/layers';
 import { Map } from 'react-map-gl/maplibre';
 import { loadCredentials, getAuthHeader } from './utils/credentials';
 import { fetchBrazilFlights, DATA_INDEX } from './api/opensky';
@@ -47,7 +47,6 @@ interface AircraftData {
 function App() {
   const [aircraftData, setAircraftData] = useState<AircraftData[]>([]);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
-  const [hoverInfo, setHoverInfo] = useState<any>(null);
   const [credentials, setCredentials] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -246,7 +245,6 @@ function App() {
       sizeMaxPixels: 64,
       pickable: true,
       onHover: (info: any) => {
-        setHoverInfo(info);
         if (info.object) {
           console.log('🖱️ Hovered aircraft:', info.object);
         }
@@ -293,7 +291,6 @@ function App() {
       pickable: true,
       onHover: (info: any) => {
         if (info.object) {
-          setHoverInfo(info);
           const airport = info.object as Airport;
           console.log('🖱️ Hovered airport:', airport.name, isInternational(airport) ? '(International)' : '(Domestic)');
         }
@@ -371,7 +368,6 @@ function App() {
       _lighting: 'pbr',
       pickable: true,
       onHover: (info: any) => {
-        setHoverInfo(info);
         if (info.object) {
           console.log('🖱️ Hovered aircraft:', info.object);
         }
@@ -450,7 +446,11 @@ function App() {
       <DeckGL
         initialViewState={INITIAL_VIEW_STATE}
         viewState={viewState}
-        onViewStateChange={({ viewState }) => setViewState(viewState)}
+        onViewStateChange={({ viewState: newViewState }) => {
+          if (newViewState) {
+            setViewState(newViewState as typeof INITIAL_VIEW_STATE);
+          }
+        }}
         controller={true}
         layers={[
           ...(airportsLayer ? [airportsLayer] : []),
@@ -476,7 +476,6 @@ function App() {
         <Map
           mapStyle={MAP_STYLE}
           reuseMaps={true}
-          preventStyleDiffing={true}
           longitude={viewState.longitude}
           latitude={viewState.latitude}
           zoom={viewState.zoom}

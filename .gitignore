@@ -41,3 +41,6 @@ credentials.json
 # Video recordings
 *.mp4
 1763649114411/
+
+# Export helper (keep it)
+# export-flight-data.html

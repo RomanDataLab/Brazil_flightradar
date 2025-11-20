@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Export Flight Data</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      margin: 10px 5px;
+      cursor: pointer;
+    }
+    pre {
+      background: #f5f5f5;
+      padding: 15px;
+      border-radius: 5px;
+      overflow-x: auto;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .info {
+      background: #e3f2fd;
+      padding: 15px;
+      border-radius: 5px;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Export Flight Data from LocalStorage</h1>
+  
+  <div class="info">
+    <p><strong>Instructions:</strong></p>
+    <ol>
+      <li>Open your Brazil Flight Tracker app in the browser</li>
+      <li>Let it load some flight data (or use cached data)</li>
+      <li>Open this page in the same browser</li>
+      <li>Click "Export Flight Data" to download your saved data</li>
+      <li>Replace <code>public/flight-data-fallback.json</code> with the exported file</li>
+    </ol>
+  </div>
+
+  <button onclick="exportData()">Export Flight Data</button>
+  <button onclick="clearData()">Clear LocalStorage</button>
+  
+  <div id="output"></div>
+
+  <script>
+    function exportData() {
+      try {
+        const data = localStorage.getItem('opensky_flight_data');
+        const timestamp = localStorage.getItem('opensky_flight_timestamp');
+        
+        if (!data) {
+          document.getElementById('output').innerHTML = '<p style="color: red;">No flight data found in LocalStorage.</p>';
+          return;
+        }
+
+        const flightData = JSON.parse(data);
+        const exportData = {
+          time: flightData.time || (timestamp ? parseInt(timestamp) : Math.floor(Date.now() / 1000)),
+          states: flightData.states || []
+        };
+
+        // Create download
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'flight-data-fallback.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        document.getElementById('output').innerHTML = `
+          <h3>✅ Export Successful!</h3>
+          <p>Downloaded: <code>flight-data-fallback.json</code></p>
+          <p>Aircraft count: ${exportData.states.length}</p>
+          <p><strong>Next steps:</strong></p>
+          <ol>
+            <li>Rename the downloaded file to <code>flight-data-fallback.json</code></li>
+            <li>Copy it to the <code>public/</code> folder in your project</li>
+            <li>Commit and push to GitHub</li>
+          </ol>
+          <h4>Preview:</h4>
+          <pre>${JSON.stringify(exportData, null, 2).substring(0, 500)}...</pre>
+        `;
+      } catch (error) {
+        document.getElementById('output').innerHTML = `<p style="color: red;">Error: ${error.message}</p>`;
+      }
+    }
+
+    function clearData() {
+      if (confirm('Are you sure you want to clear all flight data from LocalStorage?')) {
+        localStorage.removeItem('opensky_flight_data');
+        localStorage.removeItem('opensky_flight_timestamp');
+        localStorage.removeItem('opensky_api_failure_count');
+        document.getElementById('output').innerHTML = '<p style="color: green;">✅ LocalStorage cleared!</p>';
+      }
+    }
+
+    // Show current data status
+    window.onload = function() {
+      const data = localStorage.getItem('opensky_flight_data');
+      const timestamp = localStorage.getItem('opensky_flight_timestamp');
+      
+      if (data) {
+        const flightData = JSON.parse(data);
+        const age = timestamp ? Math.round((Date.now() - parseInt(timestamp)) / 1000 / 60) : 0;
+        document.getElementById('output').innerHTML = `
+          <div class="info">
+            <h3>Current LocalStorage Status:</h3>
+            <p><strong>Aircraft count:</strong> ${flightData.states?.length || 0}</p>
+            <p><strong>Data age:</strong> ${age} minutes</p>
+            <p><strong>Timestamp:</strong> ${timestamp ? new Date(parseInt(timestamp)).toLocaleString() : 'N/A'}</p>
+          </div>
+        `;
+      } else {
+        document.getElementById('output').innerHTML = '<p>No flight data found in LocalStorage. Load some data in the main app first.</p>';
+      }
+    };
+  </script>
+</body>
+</html>
+

@@ -110,3 +110,21 @@ export function clearFlightData(): void {
   }
 }
 
+export async function loadStaticFlightData(): Promise<FlightData | null> {
+  try {
+    const response = await fetch('/flight-data-fallback.json');
+    if (!response.ok) {
+      return null;
+    }
+    const data = await response.json();
+    if (data && data.states && Array.isArray(data.states)) {
+      console.log(`📦 Loaded ${data.states.length} aircraft from static fallback data`);
+      return data;
+    }
+    return null;
+  } catch (error) {
+    console.warn('⚠️ Could not load static flight data:', error);
+    return null;
+  }
+}
+

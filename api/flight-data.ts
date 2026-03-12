@@ -1,23 +1,17 @@
 // Vercel serverless function to store and retrieve flight data
-// Uses Vercel KV for persistent storage (or falls back to file-based if KV not configured)
+// Uses Upstash Redis (via REST) for persistent storage, or falls back to null
 
-let kv: any = null;
-let useKV = false;
+import { Redis } from '@upstash/redis';
 
-// Try to import Vercel KV
-try {
-  kv = require('@vercel/kv');
-  useKV = true;
-} catch (e) {
-  // KV not installed - will use file-based fallback
-  console.log('Vercel KV not available, using file-based storage');
-}
+const redis = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+  ? new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!
+    })
+  : null;
 
 const FLIGHT_DATA_KEY = 'flight_data';
 const FLIGHT_DATA_TIMESTAMP_KEY = 'flight_data_timestamp';
-
-// File-based storage fallback removed - not possible in serverless functions
-// Use Vercel KV or static files instead
 
 export default async function handler(req: any, res: any) {
   // Handle CORS
@@ -32,10 +26,10 @@ export default async function handler(req: any, res: any) {
   try {
     if (req.method === 'GET') {
       // Retrieve flight data
-      if (useKV && kv) {
+      if (redis) {
         try {
-          const data = await kv.get(FLIGHT_DATA_KEY);
-          const timestamp = await kv.get(FLIGHT_DATA_TIMESTAMP_KEY);
+          const data = await redis.get(FLIGHT_DATA_KEY);
+          const timestamp = await redis.get<number | null>(FLIGHT_DATA_TIMESTAMP_KEY);
 
           if (!data) {
             return res.status(200).json({
@@ -54,10 +48,10 @@ export default async function handler(req: any, res: any) {
           return res.status(200).json({
             success: true,
             data: flightData,
-            timestamp: timestamp ? parseInt(timestamp) : null
+            timestamp: typeof timestamp === 'number' ? timestamp : null
           });
         } catch (kvError: any) {
-          console.error('KV error:', kvError);
+          console.error('Upstash error:', kvError);
           // Fall through to return null
         }
       }
@@ -84,20 +78,20 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      if (useKV && kv) {
+      if (redis) {
         try {
           const flightData = { time, states };
-          await kv.set(FLIGHT_DATA_KEY, JSON.stringify(flightData));
-          await kv.set(FLIGHT_DATA_TIMESTAMP_KEY, Date.now().toString());
+          await redis.set(FLIGHT_DATA_KEY, JSON.stringify(flightData));
+          await redis.set(FLIGHT_DATA_TIMESTAMP_KEY, Date.now());
 
           return res.status(200).json({
             success: true,
             persisted: true,
-            message: `Saved ${states.length} aircraft states to Vercel KV`,
+            message: `Saved ${states.length} aircraft states to Upstash Redis`,
             timestamp: Date.now()
           });
         } catch (kvError: any) {
-          console.error('KV save error:', kvError);
+          console.error('Upstash save error:', kvError);
           return res.status(503).json({
             success: false,
             error: 'Storage error',
@@ -112,7 +106,7 @@ export default async function handler(req: any, res: any) {
         persisted: false,
         message: `Received ${states.length} aircraft states but KV not configured - data NOT persisted`,
         timestamp: Date.now(),
-        note: 'Install @vercel/kv and configure Vercel KV for persistent storage'
+        note: 'Configure Upstash Redis (UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN) for persistent storage'
       });
     }
 

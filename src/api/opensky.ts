@@ -83,7 +83,7 @@ export async function fetchBrazilFlights(
     const baroAltitude = state[DATA_INDEX.BARO_ALTITUDE];
     
     // Filter out invalid coordinates
-    if (lon === null || lat === null || lon === 0 && lat === 0) {
+    if (lon === null || lat === null || (lon === 0 && lat === 0)) {
       return false;
     }
     

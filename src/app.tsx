@@ -1,19 +1,14 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import DeckGL from '@deck.gl/react';
-import { ScenegraphLayer } from '@deck.gl/mesh-layers';
 import { IconLayer } from '@deck.gl/layers';
 import { Map } from 'react-map-gl/maplibre';
-import { loadCredentials, getAuthHeader } from './utils/credentials';
+import { setCredentials, hasCredentials, getAuthHeader, clearCredentials } from './utils/credentials';
 import { fetchBrazilFlights, DATA_INDEX } from './api/opensky';
-import { saveFlightData, loadFlightData, loadFlightDataEmergency, recordApiFailure, loadStaticFlightData, loadFlightDataFromVercel } from './utils/storage';
+import { saveFlightData, loadFlightData, loadFlightDataEmergency, recordApiFailure, loadStaticFlightData, loadFlightDataFromVercel, isRateLimited, getCacheAge } from './utils/storage';
 import { fetchAirports, Airport } from './utils/airports';
 import { fetchAirlines, Airline } from './utils/airlines';
 import 'maplibre-gl/dist/maplibre-gl.css';
-
-// Airplane 3D model URL - try local file first, then fallback to remote
-// Local model file in public folder
-const AIRPLANE_MODEL_URL = '/airplane.glb';
 
 // Brazil center coordinates
 const BRAZIL_CENTER = {
@@ -21,11 +16,10 @@ const BRAZIL_CENTER = {
   latitude: -10.0
 };
 
-// Initial view state - tilted view to see 3D planes (pitch: 45)
 const INITIAL_VIEW_STATE = {
   ...BRAZIL_CENTER,
   zoom: 4.2,
-  pitch: 45, // Tilted view to see 3D planes better
+  pitch: 45,
   bearing: 0
 };
 
@@ -44,136 +38,154 @@ interface AircraftData {
   velocity: number | null;
 }
 
+// --- API Key Modal ---
+function ApiKeyModal({ onSubmit, onSkip }: { onSubmit: (u: string, p: string) => void; onSkip: () => void }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9999,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      backgroundColor: 'rgba(0,0,0,0.85)'
+    }}>
+      <div style={{
+        background: '#1a1a2e', borderRadius: 8, padding: 32,
+        maxWidth: 420, width: '90%', color: '#fff', fontFamily: 'monospace'
+      }}>
+        <h2 style={{ margin: '0 0 8px', fontSize: 18 }}>OpenSky API Credentials</h2>
+        <p style={{ fontSize: 13, opacity: 0.7, margin: '0 0 20px' }}>
+          Enter your OpenSky Network credentials for higher API rate limits.
+          Without credentials, you get ~400 requests/day (anonymous).
+          With credentials, you get significantly more.
+        </p>
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Username</label>
+          <input
+            type="text" value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="OpenSky username"
+            style={{
+              width: '100%', padding: '8px 12px', borderRadius: 4,
+              border: '1px solid #444', background: '#0d0d1a', color: '#fff',
+              fontFamily: 'monospace', fontSize: 14, boxSizing: 'border-box'
+            }}
+          />
+        </div>
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Password</label>
+          <input
+            type="password" value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="OpenSky password"
+            onKeyDown={e => { if (e.key === 'Enter' && username && password) onSubmit(username, password); }}
+            style={{
+              width: '100%', padding: '8px 12px', borderRadius: 4,
+              border: '1px solid #444', background: '#0d0d1a', color: '#fff',
+              fontFamily: 'monospace', fontSize: 14, boxSizing: 'border-box'
+            }}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button
+            onClick={() => { if (username && password) onSubmit(username, password); }}
+            disabled={!username || !password}
+            style={{
+              flex: 1, padding: '10px 16px', borderRadius: 4, border: 'none',
+              background: username && password ? '#4CAF50' : '#333',
+              color: '#fff', cursor: username && password ? 'pointer' : 'not-allowed',
+              fontFamily: 'monospace', fontSize: 14, fontWeight: 'bold'
+            }}
+          >
+            Connect
+          </button>
+          <button
+            onClick={onSkip}
+            style={{
+              flex: 1, padding: '10px 16px', borderRadius: 4,
+              border: '1px solid #555', background: 'transparent',
+              color: '#aaa', cursor: 'pointer', fontFamily: 'monospace', fontSize: 14
+            }}
+          >
+            Skip (use cached)
+          </button>
+        </div>
+        <p style={{ fontSize: 11, opacity: 0.5, margin: '16px 0 0', textAlign: 'center' }}>
+          Credentials are only sent to the server proxy — never exposed in client code.
+          Register at opensky-network.org
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [aircraftData, setAircraftData] = useState<AircraftData[]>([]);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
-  const [credentials, setCredentials] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [cacheStatus, setCacheStatus] = useState<string>('');
-  const [useIconFallback, setUseIconFallback] = useState(false);
   const [airports, setAirports] = useState<Airport[]>([]);
   const [airlines, setAirlines] = useState<Airline[]>([]);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [initialized, setInitialized] = useState(false);
 
-  // Load credentials, airports, and airlines on mount
+  // Fix #9: request deduplication
+  const fetchInProgress = useRef(false);
+
+  // On mount: check if we have cached data, show modal if no creds configured
   useEffect(() => {
-    loadCredentials().then(creds => {
-      setCredentials(creds);
-      console.log('✅ Credentials loaded');
-    }).catch(err => {
-      console.error('❌ Failed to load credentials:', err);
-      setError('Failed to load credentials');
-    });
-    
-    // Load airports
-    fetchAirports().then(data => {
-      setAirports(data);
-    });
-    
-    // Load airlines
-    fetchAirlines().then(data => {
-      setAirlines(data);
-    });
-    
-    setIsLoading(false);
+    (async () => {
+      // Load airports & airlines (cached with 7-day TTL)
+      fetchAirports().then(setAirports);
+      fetchAirlines().then(setAirlines);
+
+      // Check if server has creds configured (env vars)
+      // If not, and no cached data, show the API key modal
+      const cached = await loadFlightData();
+      if (cached && cached.states && cached.states.length > 0) {
+        // We have cached data, show it immediately
+        processFlightData(cached);
+        const age = await getCacheAge();
+        setCacheStatus(`Loaded from cache (${Math.round(age / 1000 / 60)} min old)`);
+        setInitialized(true);
+        setIsLoading(false);
+      } else {
+        // No cached data — show API key prompt
+        setShowApiKeyModal(true);
+        setIsLoading(false);
+      }
+    })();
   }, []);
 
-  // Fetch flight data
-  const fetchData = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
+  const handleApiKeySubmit = useCallback((username: string, password: string) => {
+    setCredentials({ username, password });
+    setShowApiKeyModal(false);
+    setInitialized(true);
+  }, []);
 
-      // Try to load cached data first (for immediate display)
-      const cachedData = loadFlightData();
-      if (cachedData && cachedData.states && cachedData.states.length > 0) {
-        const timestamp = localStorage.getItem('opensky_flight_timestamp');
-        const age = timestamp ? Date.now() - parseInt(timestamp, 10) : 0;
-        const ageMinutes = Math.round(age / 1000 / 60);
-        console.log(`📦 Using cached flight data: ${cachedData.states.length} aircraft`);
-        setCacheStatus(`📦 Loaded from cache (${ageMinutes} min old)`);
-        processFlightData(cachedData);
-      }
-
-      // Try to fetch fresh data (with or without credentials)
-      const authHeader = credentials ? getAuthHeader(credentials) : null;
-      console.log('🔄 Fetching flight data...', authHeader ? 'with credentials' : 'without credentials');
-      
-      const data = await fetchBrazilFlights(authHeader);
-      
-      console.log(`✅ Fetched ${data.states.length} aircraft states`);
-      
-      if (data.states.length === 0) {
-        console.warn('⚠️ No aircraft found in response');
-        // Keep using cached data if available, but don't save empty data
-        return;
-      }
-      
-      // Save to cache (always save successful API responses)
-      saveFlightData(data);
-      setCacheStatus(`✅ Saved ${data.states.length} aircraft`);
-      
-      // Process and update aircraft data
+  const handleApiKeySkip = useCallback(async () => {
+    setShowApiKeyModal(false);
+    setInitialized(true);
+    // Try emergency/static fallbacks
+    let data = await loadFlightDataEmergency();
+    if (!data) data = await loadFlightDataFromVercel();
+    if (!data) data = await loadStaticFlightData();
+    if (data && data.states && data.states.length > 0) {
       processFlightData(data);
-    } catch (err: any) {
-      console.error('❌ Error fetching flights:', err);
-      setError(err.message || 'Failed to fetch flight data');
-      
-      // Record API failure for extended cache duration
-      recordApiFailure();
-      
-      // Try to use cached data as fallback (normal cache first)
-      let cachedData = loadFlightData();
-      
-      // If normal cache expired, try emergency fallback (any cached data)
-      if (!cachedData || !cachedData.states || cachedData.states.length === 0) {
-        console.log('🔄 Normal cache expired, trying emergency fallback...');
-        cachedData = loadFlightDataEmergency();
-      }
-      
-      // If still no cached data, try Vercel storage
-      if (!cachedData || !cachedData.states || cachedData.states.length === 0) {
-        console.log('🔄 No cached data, trying Vercel storage...');
-        cachedData = await loadFlightDataFromVercel();
-      }
-      
-      // If still no cached data, try static fallback file
-      if (!cachedData || !cachedData.states || cachedData.states.length === 0) {
-        console.log('🔄 No cached data, trying static fallback file...');
-        cachedData = await loadStaticFlightData();
-      }
-      
-      if (cachedData && cachedData.states && cachedData.states.length > 0) {
-        const timestamp = localStorage.getItem('opensky_flight_timestamp');
-        const age = timestamp ? Date.now() - parseInt(timestamp, 10) : Infinity;
-        const ageMinutes = Math.round(age / 1000 / 60);
-        console.log(`📦 Using cached data as fallback: ${cachedData.states.length} aircraft (age: ${ageMinutes} min)`);
-        setCacheStatus(`📦 Using cached data (${ageMinutes} min old)`);
-        processFlightData(cachedData);
-      } else {
-        console.warn('⚠️ No cached data available - showing empty map');
-        setCacheStatus('⚠️ No cached data available');
-        setAircraftData([]);
-      }
-    } finally {
-      setIsLoading(false);
+      setCacheStatus('Using fallback data (no API credentials)');
+    } else {
+      setCacheStatus('No cached data available');
     }
-  }, [credentials]);
+  }, []);
 
-  // Process flight data and transform to deck.gl format
+  // Process flight data into deck.gl format
   const processFlightData = useCallback((data: { time: number; states: any[][] }) => {
-    if (!data || !data.states || !Array.isArray(data.states)) {
-      console.error('❌ Invalid data format:', data);
-      return;
-    }
+    if (!data || !data.states || !Array.isArray(data.states)) return;
 
     const aircraft: AircraftData[] = [];
-
     data.states.forEach((state, index) => {
-      if (!state || !Array.isArray(state)) {
-        console.warn(`⚠️ Invalid state at index ${index}:`, state);
-        return;
-      }
+      if (!state || !Array.isArray(state)) return;
 
       const lon = state[DATA_INDEX.LONGITUDE];
       const lat = state[DATA_INDEX.LATITUDE];
@@ -183,64 +195,109 @@ function App() {
       const callsign = state[DATA_INDEX.CALLSIGN];
       const velocity = state[DATA_INDEX.VELOCITY];
 
-      if (lon === null || lat === null || baroAltitude === null) {
-        return;
-      }
-
-      // Scale altitude for visibility - planes fly at 10-12km but need scaling for deck.gl
-      // deck.gl uses meters, but at zoom 4.2, we need to scale down for visibility
-      // Scale: divide by 100 so 10km becomes 100 units
-      const altitude = baroAltitude / 100;
-
-      // Convert heading from degrees (0-360) to deck.gl format
-      // deck.gl orientation: [pitch, yaw, roll] in degrees
-      // yaw: 0 = north, clockwise is positive
-      const heading = trueTrack !== null ? trueTrack : 0;
+      if (lon === null || lat === null || baroAltitude === null) return;
 
       aircraft.push({
-        position: [lon, lat, altitude],
-        heading,
+        position: [lon, lat, baroAltitude / 100],
+        heading: trueTrack !== null ? trueTrack : 0,
         icao24: icao24 || `unknown-${index}`,
         callsign: callsign ? callsign.trim() : null,
-        altitude: baroAltitude, // Keep original altitude for display
+        altitude: baroAltitude,
         velocity: velocity || null
       });
     });
 
     setAircraftData(aircraft);
-    console.log(`✈️ Processed ${aircraft.length} aircraft`);
-    if (aircraft.length > 0) {
-      console.log('📍 Sample aircraft:', aircraft[0]);
-    }
+    console.log(`Processed ${aircraft.length} aircraft`);
   }, []);
 
-  // Initial data fetch (try even without credentials)
-  useEffect(() => {
-    // Wait a bit for credentials to load, then fetch
-    const timer = setTimeout(() => {
-      fetchData();
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [fetchData]);
+  // Fetch flight data with deduplication
+  const fetchData = useCallback(async () => {
+    // Fix #9: prevent concurrent fetches
+    if (fetchInProgress.current) return;
+    fetchInProgress.current = true;
 
-  // Set up periodic updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      console.log('🔄 Updating flight data...');
-      fetchData();
-    }, UPDATE_INTERVAL_MS);
+    try {
+      setIsLoading(true);
+      setError(null);
 
-    return () => clearInterval(interval);
-  }, [fetchData]);
+      // Fix #1: skip API call if currently rate-limited
+      const rateLimited = await isRateLimited();
+      if (rateLimited) {
+        console.log('Rate-limited: using cached data');
+        const cached = await loadFlightData();
+        if (cached && cached.states && cached.states.length > 0) {
+          processFlightData(cached);
+          const age = await getCacheAge();
+          setCacheStatus(`Rate-limited — using cache (${Math.round(age / 1000 / 60)} min old)`);
+        }
+        return;
+      }
 
+      // Try cached data first for immediate display
+      const cachedData = await loadFlightData();
+      if (cachedData && cachedData.states && cachedData.states.length > 0) {
+        const age = await getCacheAge();
+        processFlightData(cachedData);
+        setCacheStatus(`Loaded from cache (${Math.round(age / 1000 / 60)} min old)`);
+      }
 
-  // Create icon layer for airplane display
-  const iconLayer = useMemo(() => {
-    if (!aircraftData.length) {
-      return null;
+      // Fetch fresh data — credentials go through the server-side proxy
+      const authHeader = getAuthHeader();
+      const data = await fetchBrazilFlights(authHeader);
+
+      if (data.states.length === 0) {
+        console.warn('No aircraft found in response');
+        return;
+      }
+
+      await saveFlightData(data);
+      setCacheStatus(`Live: ${data.states.length} aircraft`);
+      processFlightData(data);
+    } catch (err: any) {
+      console.error('Error fetching flights:', err);
+      setError(err.message || 'Failed to fetch flight data');
+
+      // Fix #1: record failure with status code
+      const statusCode = err.message?.includes('429') ? 429 : undefined;
+      await recordApiFailure(statusCode);
+
+      // Fallback chain
+      let fallback = await loadFlightData();
+      if (!fallback?.states?.length) fallback = await loadFlightDataEmergency();
+      if (!fallback?.states?.length) fallback = await loadFlightDataFromVercel();
+      if (!fallback?.states?.length) fallback = await loadStaticFlightData();
+
+      if (fallback && fallback.states && fallback.states.length > 0) {
+        const age = await getCacheAge();
+        setCacheStatus(`API error — using cache (${Math.round(age / 1000 / 60)} min old)`);
+        processFlightData(fallback);
+      } else {
+        setCacheStatus('No cached data available');
+        setAircraftData([]);
+      }
+    } finally {
+      setIsLoading(false);
+      fetchInProgress.current = false;
     }
-    
-    console.log('✈️ Creating icon layer with', aircraftData.length, 'aircraft');
+  }, [processFlightData]);
+
+  // Start fetching once initialized
+  useEffect(() => {
+    if (!initialized) return;
+    fetchData();
+  }, [initialized, fetchData]);
+
+  // Periodic updates
+  useEffect(() => {
+    if (!initialized) return;
+    const interval = setInterval(fetchData, UPDATE_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [initialized, fetchData]);
+
+  // Icon layer for aircraft
+  const iconLayer = useMemo(() => {
+    if (!aircraftData.length) return null;
     return new IconLayer({
       id: 'aircraft-icon-layer',
       data: aircraftData,
@@ -251,40 +308,26 @@ function App() {
         height: 16,
         anchorY: 8
       }),
-      getAngle: (d: AircraftData) => -d.heading, // Rotate icon based on heading
-      sizeScale: 8, // Increased scale since icon is smaller (16x16)
+      getAngle: (d: AircraftData) => -d.heading,
+      sizeScale: 8,
       sizeMinPixels: 16,
       sizeMaxPixels: 64,
-      pickable: true,
-      onHover: (info: any) => {
-        if (info.object) {
-          console.log('🖱️ Hovered aircraft:', info.object);
-        }
-      }
+      pickable: true
     });
   }, [aircraftData]);
 
-  // Create airports layer
+  // Airports layer
   const airportsLayer = useMemo(() => {
-    if (!airports.length) {
-      console.log('⚠️ No airports data available');
-      return null;
-    }
-    
-    // Helper function to check if airport is international
+    if (!airports.length) return null;
+
     const isInternational = (airport: Airport): boolean => {
       const nameLower = airport.name.toLowerCase();
       const typeLower = airport.type.toLowerCase();
-      return nameLower.includes('international') || 
+      return nameLower.includes('international') ||
              nameLower.includes('internacional') ||
              typeLower.includes('international');
     };
 
-    const internationalCount = airports.filter(isInternational).length;
-    console.log('🏢 Creating airports layer with', airports.length, 'airports');
-    console.log('🌍 International airports:', internationalCount);
-    console.log('📍 Sample airport:', airports[0]);
-    
     return new IconLayer({
       id: 'airports-layer',
       data: airports,
@@ -296,109 +339,18 @@ function App() {
         anchorY: 16,
         mask: false
       }),
-      getSize: (d: Airport) => isInternational(d) ? 2 : 1, // 2x size for international
+      getSize: (d: Airport) => isInternational(d) ? 2 : 1,
       sizeScale: 2,
-      sizeMinPixels: 16, // Min size for regular airports
-      sizeMaxPixels: 64, // Max size to accommodate 2x international airports
-      pickable: true,
-      onHover: (info: any) => {
-        if (info.object) {
-          const airport = info.object as Airport;
-          console.log('🖱️ Hovered airport:', airport.name, isInternational(airport) ? '(International)' : '(Domestic)');
-        }
-      },
-      onError: (error: any) => {
-        console.error('❌ Airport icon error:', error);
-      }
+      sizeMinPixels: 16,
+      sizeMaxPixels: 64,
+      pickable: true
     });
   }, [airports]);
 
-  // Create scenegraph layer (3D models) - only if model file exists
-  const scenegraphLayer = useMemo(() => {
-    // Skip 3D layer for now, use icons instead
-    // if (!aircraftData.length || useIconFallback) {
-    //   return null;
-    // }
-    return null; // Disable 3D models, use icons instead
-
-    console.log(`✈️ Creating scenegraph layer with ${aircraftData.length} aircraft`);
-    if (aircraftData.length > 0) {
-      console.log('📍 First aircraft position:', JSON.stringify(aircraftData[0]?.position));
-      console.log('📍 First aircraft heading:', aircraftData[0]?.heading);
-      console.log('📍 First aircraft altitude (original):', aircraftData[0]?.altitude);
-    }
-    
-    // Use all aircraft data - ensure positions are valid
-    const processedData = aircraftData.filter(d => {
-      const pos = d.position;
-      return pos && pos.length >= 2 && 
-             typeof pos[0] === 'number' && 
-             typeof pos[1] === 'number' &&
-             !isNaN(pos[0]) && !isNaN(pos[1]);
-    }).map((d) => ({
-      ...d,
-      position: [d.position[0], d.position[1], d.position[2] || 0] as [number, number, number]
-    }));
-    
-    console.log('🧪 Processing', processedData.length, 'valid aircraft');
-    if (processedData.length > 0) {
-      console.log('📍 Sample positions:', processedData.slice(0, 3).map(d => ({
-        lon: d.position[0],
-        lat: d.position[1],
-        alt: d.position[2]
-      })));
-    }
-    
-    return new ScenegraphLayer({
-      id: 'aircraft-layer',
-      data: processedData,
-      scenegraph: AIRPLANE_MODEL_URL,
-      loadOptions: {
-        fetch: {
-          mode: 'cors'
-        }
-      },
-      getPosition: (d: AircraftData) => d.position,
-      getOrientation: (d: AircraftData) => {
-        // deck.gl orientation: [pitch, yaw, roll] in degrees
-        // Based on deck.gl scenegraph example: [0, -heading, 90]
-        // pitch: 0 = level flight
-        // yaw: negative because deck.gl yaw is counter-clockwise from north
-        // roll: 90 degrees to orient airplane correctly (wings horizontal)
-        const yaw = -d.heading; // Convert clockwise heading to counter-clockwise yaw
-        return [0, yaw, 90];
-      },
-      getScale: [1, 1, 1],
-      sizeScale: 500,
-      sizeMinPixels: 10,
-      sizeMaxPixels: 200,
-      _animations: {
-        '*': {
-          speed: 1
-        }
-      },
-      _lighting: 'pbr',
-      pickable: true,
-      onHover: (info: any) => {
-        if (info.object) {
-          console.log('🖱️ Hovered aircraft:', info.object);
-        }
-      },
-      onError: (error: any) => {
-        console.error('❌ ScenegraphLayer error:', error);
-        if (error.message && error.message.includes('404')) {
-          console.warn('⚠️ Model URL failed (404), switching to icon fallback...');
-          setUseIconFallback(true);
-        }
-      }
-    });
-  }, [aircraftData, useIconFallback]);
-
-  // Get tooltip content
+  // Tooltip
   const getTooltip = useCallback((info: any) => {
     if (!info.object) return null;
 
-    // Check if it's an airport
     if ('name' in info.object && 'city' in info.object) {
       const airport = info.object as Airport;
       return {
@@ -406,84 +358,47 @@ function App() {
           <div style="padding: 8px; font-family: monospace; font-size: 12px;">
             <div><strong>${airport.name}</strong></div>
             <div>City: ${airport.city}</div>
-            ${airport.iata && `<div>IATA: ${airport.iata}</div>`}
-            ${airport.icao && `<div>ICAO: ${airport.icao}</div>`}
+            ${airport.iata ? `<div>IATA: ${airport.iata}</div>` : ''}
+            ${airport.icao ? `<div>ICAO: ${airport.icao}</div>` : ''}
             <div>Altitude: ${Math.round(airport.altitude)} ft</div>
           </div>
         `,
-        style: {
-          backgroundColor: 'rgba(0, 0, 0, 0.8)',
-          color: 'white',
-          borderRadius: '4px'
-        }
+        style: { backgroundColor: 'rgba(0, 0, 0, 0.8)', color: 'white', borderRadius: '4px' }
       };
     }
 
-    // Otherwise it's an aircraft
     const aircraft = info.object as AircraftData;
-    const callsign = aircraft.callsign || 'Unknown';
-    const altitude = Math.round(aircraft.altitude);
-    const velocity = aircraft.velocity ? Math.round(aircraft.velocity * 3.6) : 'N/A'; // Convert m/s to km/h
-
     return {
       html: `
         <div style="padding: 8px; font-family: monospace; font-size: 12px;">
-          <div><strong>Callsign:</strong> ${callsign}</div>
+          <div><strong>Callsign:</strong> ${aircraft.callsign || 'Unknown'}</div>
           <div><strong>ICAO24:</strong> ${aircraft.icao24}</div>
-          <div><strong>Altitude:</strong> ${altitude} m</div>
-          <div><strong>Speed:</strong> ${velocity} km/h</div>
+          <div><strong>Altitude:</strong> ${Math.round(aircraft.altitude)} m</div>
+          <div><strong>Speed:</strong> ${aircraft.velocity ? Math.round(aircraft.velocity * 3.6) : 'N/A'} km/h</div>
         </div>
       `,
-      style: {
-        backgroundColor: 'rgba(0, 0, 0, 0.8)',
-        color: 'white',
-        borderRadius: '4px'
-      }
+      style: { backgroundColor: 'rgba(0, 0, 0, 0.8)', color: 'white', borderRadius: '4px' }
     };
   }, []);
 
-  useEffect(() => {
-    console.log('🗺️ Map style:', MAP_STYLE);
-    console.log('📍 View state:', viewState);
-    console.log('✈️ Aircraft count:', aircraftData.length);
-    console.log('🔍 ScenegraphLayer exists:', scenegraphLayer !== null);
-    if (scenegraphLayer) {
-      console.log('🔍 ScenegraphLayer ID:', scenegraphLayer.id);
-      console.log('🔍 ScenegraphLayer data length:', scenegraphLayer.props?.data?.length);
-    }
-  }, [viewState, aircraftData.length, scenegraphLayer]);
-
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+      {showApiKeyModal && (
+        <ApiKeyModal onSubmit={handleApiKeySubmit} onSkip={handleApiKeySkip} />
+      )}
+
       <DeckGL
         initialViewState={INITIAL_VIEW_STATE}
         viewState={viewState}
         onViewStateChange={({ viewState: newViewState }) => {
-          if (newViewState) {
-            setViewState(newViewState as typeof INITIAL_VIEW_STATE);
-          }
+          if (newViewState) setViewState(newViewState as typeof INITIAL_VIEW_STATE);
         }}
         controller={true}
         layers={[
           ...(airportsLayer ? [airportsLayer] : []),
-          ...(scenegraphLayer ? [scenegraphLayer] : []),
           ...(iconLayer ? [iconLayer] : [])
         ]}
         getTooltip={getTooltip}
-        onLoad={() => {
-          console.log('✅ DeckGL loaded');
-          console.log('🔍 Layers count:', scenegraphLayer ? 1 : 0);
-          if (scenegraphLayer) {
-            console.log('🔍 ScenegraphLayer props:', {
-              dataLength: scenegraphLayer.props?.data?.length,
-              scenegraph: scenegraphLayer.props?.scenegraph,
-              sizeScale: scenegraphLayer.props?.sizeScale
-            });
-          }
-        }}
-        onError={(error) => {
-          console.error('❌ DeckGL error:', error);
-        }}
       >
         <Map
           mapStyle={MAP_STYLE}
@@ -493,109 +408,84 @@ function App() {
           zoom={viewState.zoom}
           pitch={viewState.pitch}
           bearing={viewState.bearing}
-          onLoad={() => {
-            console.log('✅ Map loaded successfully');
-            setIsLoading(false);
-          }}
           onError={(e) => {
-            console.error('❌ Map error:', e);
+            console.error('Map error:', e);
             setError(`Map error: ${e.error?.message || 'Unknown error'}`);
           }}
         />
       </DeckGL>
-      
+
       {error && (
         <div style={{
-          position: 'absolute',
-          top: '10px',
-          left: '10px',
-          padding: '10px',
-          backgroundColor: 'rgba(255, 0, 0, 0.8)',
-          color: 'white',
-          borderRadius: '4px',
-          fontFamily: 'monospace',
-          fontSize: '12px',
-          zIndex: 1000
+          position: 'absolute', top: 10, left: 10, padding: 10,
+          backgroundColor: 'rgba(255, 0, 0, 0.8)', color: 'white',
+          borderRadius: 4, fontFamily: 'monospace', fontSize: 12, zIndex: 1000
         }}>
-          ⚠️ {error}
+          {error}
         </div>
       )}
-      
-      {isLoading && (
+
+      {isLoading && !showApiKeyModal && (
         <div style={{
-          position: 'absolute',
-          top: '10px',
-          right: '10px',
-          padding: '10px',
-          backgroundColor: 'rgba(0, 0, 0, 0.8)',
-          color: 'white',
-          borderRadius: '4px',
-          fontFamily: 'monospace',
-          fontSize: '12px',
-          zIndex: 1000
+          position: 'absolute', top: 10, right: 10, padding: 10,
+          backgroundColor: 'rgba(0, 0, 0, 0.8)', color: 'white',
+          borderRadius: 4, fontFamily: 'monospace', fontSize: 12, zIndex: 1000
         }}>
-          🔄 Loading...
+          Loading...
         </div>
       )}
-      
+
       <div style={{
-        position: 'absolute',
-        bottom: '10px',
-        left: '10px',
-        padding: '10px',
-        backgroundColor: 'rgba(0, 0, 0, 0.8)',
-        color: 'white',
-        borderRadius: '4px',
-        fontFamily: 'monospace',
-        fontSize: '12px',
-        zIndex: 1000
+        position: 'absolute', bottom: 10, left: 10, padding: 10,
+        backgroundColor: 'rgba(0, 0, 0, 0.8)', color: 'white',
+        borderRadius: 4, fontFamily: 'monospace', fontSize: 12, zIndex: 1000
       }}>
-        <div>✈️ Aircraft: {aircraftData.length}</div>
-        <div>🏢 Airports: {airports.length}</div>
-        <div>🔄 Updates every 5 min</div>
-        {cacheStatus && <div style={{ marginTop: '4px', fontSize: '11px', opacity: 0.8 }}>{cacheStatus}</div>}
+        <div>Aircraft: {aircraftData.length}</div>
+        <div>Airports: {airports.length}</div>
+        <div>Updates every 5 min</div>
+        {cacheStatus && <div style={{ marginTop: 4, fontSize: 11, opacity: 0.8 }}>{cacheStatus}</div>}
+        <button
+          onClick={() => {
+            clearCredentials();
+            setShowApiKeyModal(true);
+          }}
+          style={{
+            marginTop: 8, padding: '4px 8px', borderRadius: 4,
+            border: '1px solid #555', background: 'transparent',
+            color: '#aaa', cursor: 'pointer', fontFamily: 'monospace', fontSize: 11
+          }}
+        >
+          {hasCredentials() ? 'Change API Key' : 'Set API Key'}
+        </button>
       </div>
-      
+
       {/* Airlines Legend */}
       {airlines.length > 0 && (
         <div style={{
-          position: 'absolute',
-          top: '10px',
-          right: '10px',
-          padding: '10px',
-          backgroundColor: 'rgba(0, 0, 0, 0.9)',
-          color: 'white',
-          borderRadius: '4px',
-          fontFamily: 'monospace',
-          fontSize: '11px',
-          zIndex: 1000,
-          maxHeight: '80vh',
-          overflowY: 'auto',
-          minWidth: '200px',
-          maxWidth: '300px'
+          position: 'absolute', top: 10, right: 10, padding: 10,
+          backgroundColor: 'rgba(0, 0, 0, 0.9)', color: 'white',
+          borderRadius: 4, fontFamily: 'monospace', fontSize: 11, zIndex: 1000,
+          maxHeight: '80vh', overflowY: 'auto', minWidth: 200, maxWidth: 300
         }}>
-          <div style={{ 
-            fontWeight: 'bold', 
-            marginBottom: '8px', 
-            fontSize: '12px',
-            borderBottom: '1px solid rgba(255,255,255,0.3)',
-            paddingBottom: '4px'
+          <div style={{
+            fontWeight: 'bold', marginBottom: 8, fontSize: 12,
+            borderBottom: '1px solid rgba(255,255,255,0.3)', paddingBottom: 4
           }}>
-            🇧🇷 Brazil Airlines ({airlines.length})
+            Brazil Airlines ({airlines.length})
           </div>
           {airlines.map((airline, index) => (
-            <div 
+            <div
               key={airline.id || index}
-              style={{ 
+              style={{
                 padding: '4px 0',
                 borderBottom: index < airlines.length - 1 ? '1px solid rgba(255,255,255,0.1)' : 'none'
               }}
             >
               <div style={{ fontWeight: 'bold' }}>{airline.name}</div>
               {(airline.iata || airline.icao) && (
-                <div style={{ fontSize: '10px', opacity: 0.8, marginTop: '2px' }}>
+                <div style={{ fontSize: 10, opacity: 0.8, marginTop: 2 }}>
                   {airline.iata && `IATA: ${airline.iata}`}
-                  {airline.iata && airline.icao && ' • '}
+                  {airline.iata && airline.icao && ' | '}
                   {airline.icao && `ICAO: ${airline.icao}`}
                 </div>
               )}
@@ -612,4 +502,3 @@ if (container) {
   const root = createRoot(container);
   root.render(<App />);
 }
-

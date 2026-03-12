@@ -1,203 +1,253 @@
-const STORAGE_KEY = 'opensky_flight_data';
-const STORAGE_TIMESTAMP_KEY = 'opensky_flight_timestamp';
-const STORAGE_API_FAILURE_KEY = 'opensky_api_failure_count';
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
-const EXTENDED_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours when API is unavailable
+// IndexedDB-based storage (supports up to 10GB+ depending on browser/disk)
+// Falls back to localStorage if IndexedDB is unavailable
+
+const DB_NAME = 'airflight_db';
+const DB_VERSION = 1;
+const STORE_NAME = 'flight_data';
+const FLIGHT_DATA_KEY = 'current_flight_data';
+const METADATA_KEY = 'metadata';
+
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+// When API rate-limited (429), cache until daily reset (~24h from first failure)
+const RATE_LIMIT_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface FlightData {
   time: number;
   states: any[][];
 }
 
-export function saveFlightData(data: FlightData): void {
+interface FlightMetadata {
+  timestamp: number;
+  apiFailureCount: number;
+  rateLimitedUntil: number | null; // epoch ms when rate limit resets
+}
+
+// --- IndexedDB helpers ---
+
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function idbGet<T>(key: string): Promise<T | null> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get(key);
+    request.onsuccess = () => resolve(request.result ?? null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function idbSet<T>(key: string, value: T): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.put(value, key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+// --- Metadata ---
+
+async function getMetadata(): Promise<FlightMetadata> {
   try {
-    if (!data || !data.states || data.states.length === 0) {
-      console.warn('⚠️ Not saving empty flight data');
-      return;
-    }
-    
-    // Save to localStorage first (immediate)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    localStorage.setItem(STORAGE_TIMESTAMP_KEY, Date.now().toString());
-    // Reset API failure count on successful save
-    localStorage.removeItem(STORAGE_API_FAILURE_KEY);
-    console.log(`💾 Saved ${data.states.length} aircraft to local cache`);
-    
-    // Also save to Vercel in the background (non-blocking)
+    const meta = await idbGet<FlightMetadata>(METADATA_KEY);
+    return meta || { timestamp: 0, apiFailureCount: 0, rateLimitedUntil: null };
+  } catch {
+    return { timestamp: 0, apiFailureCount: 0, rateLimitedUntil: null };
+  }
+}
+
+async function setMetadata(meta: FlightMetadata): Promise<void> {
+  try {
+    await idbSet(METADATA_KEY, meta);
+  } catch (error) {
+    console.error('Failed to save metadata:', error);
+  }
+}
+
+// --- Public API ---
+
+export async function saveFlightData(data: FlightData): Promise<void> {
+  if (!data || !data.states || data.states.length === 0) {
+    console.warn('Not saving empty flight data');
+    return;
+  }
+
+  try {
+    await idbSet(FLIGHT_DATA_KEY, data);
+    await setMetadata({
+      timestamp: Date.now(),
+      apiFailureCount: 0,
+      rateLimitedUntil: null
+    });
+    console.log(`Saved ${data.states.length} aircraft to IndexedDB`);
+
+    // Also sync to Vercel in the background (non-blocking)
     saveFlightDataToVercel(data).catch(err => {
-      // Silently fail - Vercel sync is optional
       console.debug('Vercel sync failed (non-critical):', err);
     });
   } catch (error) {
-    console.error('❌ Error saving flight data:', error);
-    // If storage is full, try to clear old data
-    if (error instanceof DOMException && error.name === 'QuotaExceededError') {
-      console.warn('⚠️ Storage quota exceeded, clearing old data...');
-      clearFlightData();
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        localStorage.setItem(STORAGE_TIMESTAMP_KEY, Date.now().toString());
-        console.log('✅ Successfully saved after clearing old data');
-        // Try Vercel sync again
-        saveFlightDataToVercel(data).catch(() => {});
-      } catch (retryError) {
-        console.error('❌ Still unable to save after clearing:', retryError);
-      }
+    console.error('Error saving flight data to IndexedDB:', error);
+    // Fallback to localStorage
+    try {
+      localStorage.setItem('opensky_flight_data', JSON.stringify(data));
+      localStorage.setItem('opensky_flight_timestamp', Date.now().toString());
+    } catch (lsError) {
+      console.error('localStorage fallback also failed:', lsError);
     }
   }
 }
 
-export function loadFlightData(): FlightData | null {
+export async function loadFlightData(): Promise<FlightData | null> {
   try {
-    const timestamp = localStorage.getItem(STORAGE_TIMESTAMP_KEY);
-    if (!timestamp) {
-      return null;
+    const meta = await getMetadata();
+    if (!meta.timestamp) return null;
+
+    const age = Date.now() - meta.timestamp;
+
+    // If rate-limited, use extended cache duration until limit resets
+    let cacheDuration = CACHE_DURATION;
+    if (meta.rateLimitedUntil && Date.now() < meta.rateLimitedUntil) {
+      cacheDuration = meta.rateLimitedUntil - meta.timestamp;
+      console.log(`Rate-limited: using cached data until ${new Date(meta.rateLimitedUntil).toLocaleTimeString()}`);
+    } else if (meta.apiFailureCount > 3) {
+      cacheDuration = RATE_LIMIT_CACHE_DURATION;
     }
-    
-    const age = Date.now() - parseInt(timestamp, 10);
-    
-    // Check if API has been failing - if so, use extended cache duration
-    const failureCount = parseInt(localStorage.getItem(STORAGE_API_FAILURE_KEY) || '0', 10);
-    const cacheDuration = failureCount > 3 ? EXTENDED_CACHE_DURATION : CACHE_DURATION;
-    
+
     if (age > cacheDuration) {
-      console.log(`⏰ Cache expired (age: ${Math.round(age / 1000 / 60)} min, max: ${Math.round(cacheDuration / 1000 / 60)} min)`);
-      // Don't delete, just return null - keep data for emergency fallback
+      console.log(`Cache expired (age: ${Math.round(age / 1000 / 60)} min)`);
       return null;
     }
-    
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (!data) {
-      return null;
+
+    const data = await idbGet<FlightData>(FLIGHT_DATA_KEY);
+    if (data && data.states) {
+      console.log(`Loaded ${data.states.length} aircraft from cache (age: ${Math.round(age / 1000 / 60)} min)`);
     }
-    
-    const parsed = JSON.parse(data);
-    console.log(`📦 Loaded ${parsed.states?.length || 0} aircraft from cache (age: ${Math.round(age / 1000 / 60)} min)`);
-    return parsed;
-  } catch (error) {
-    console.error('❌ Error loading flight data:', error);
+    return data;
+  } catch {
     return null;
   }
 }
 
-export function loadFlightDataEmergency(): FlightData | null {
-  // Emergency fallback - load data regardless of age
+export async function loadFlightDataEmergency(): Promise<FlightData | null> {
   try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (!data) {
+    const data = await idbGet<FlightData>(FLIGHT_DATA_KEY);
+    if (data && data.states) {
+      const meta = await getMetadata();
+      const age = meta.timestamp ? Date.now() - meta.timestamp : 0;
+      console.log(`Emergency: Loaded ${data.states.length} aircraft (age: ${Math.round(age / 1000 / 60)} min)`);
+    }
+    return data;
+  } catch {
+    // Try localStorage fallback
+    try {
+      const raw = localStorage.getItem('opensky_flight_data');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
       return null;
     }
-    
-    const parsed = JSON.parse(data);
-    const timestamp = localStorage.getItem(STORAGE_TIMESTAMP_KEY);
-    const age = timestamp ? Date.now() - parseInt(timestamp, 10) : 0;
-    
-    console.log(`🚨 Emergency: Loaded ${parsed.states?.length || 0} aircraft from cache (age: ${Math.round(age / 1000 / 60)} min)`);
-    return parsed;
-  } catch (error) {
-    console.error('❌ Error loading emergency flight data:', error);
-    return null;
   }
 }
 
-export function recordApiFailure(): void {
-  try {
-    const count = parseInt(localStorage.getItem(STORAGE_API_FAILURE_KEY) || '0', 10);
-    localStorage.setItem(STORAGE_API_FAILURE_KEY, (count + 1).toString());
-    console.log(`⚠️ API failure count: ${count + 1}`);
-  } catch (error) {
-    console.error('Error recording API failure:', error);
+export async function recordApiFailure(statusCode?: number): Promise<void> {
+  const meta = await getMetadata();
+  meta.apiFailureCount += 1;
+
+  // If rate-limited (429), set a reset time ~24h from now
+  if (statusCode === 429) {
+    meta.rateLimitedUntil = Date.now() + RATE_LIMIT_CACHE_DURATION;
+    console.log(`Rate limited (429). Caching data until ${new Date(meta.rateLimitedUntil).toLocaleTimeString()}`);
   }
+
+  await setMetadata(meta);
+  console.log(`API failure count: ${meta.apiFailureCount}`);
 }
 
-export function clearFlightData(): void {
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(STORAGE_TIMESTAMP_KEY);
-  } catch (error) {
-    console.error('Error clearing flight data:', error);
-  }
+export async function isRateLimited(): Promise<boolean> {
+  const meta = await getMetadata();
+  return !!(meta.rateLimitedUntil && Date.now() < meta.rateLimitedUntil);
+}
+
+export async function getCacheAge(): Promise<number> {
+  const meta = await getMetadata();
+  return meta.timestamp ? Date.now() - meta.timestamp : Infinity;
 }
 
 export async function loadStaticFlightData(): Promise<FlightData | null> {
   try {
     const response = await fetch('/flight-data-fallback.json');
-    if (!response.ok) {
-      return null;
-    }
+    if (!response.ok) return null;
     const data = await response.json();
     if (data && data.states && Array.isArray(data.states)) {
-      console.log(`📦 Loaded ${data.states.length} aircraft from static fallback data`);
+      console.log(`Loaded ${data.states.length} aircraft from static fallback`);
       return data;
     }
     return null;
-  } catch (error) {
-    console.warn('⚠️ Could not load static flight data:', error);
+  } catch {
     return null;
   }
 }
 
-// Vercel storage functions - sync with serverless API
-export async function saveFlightDataToVercel(data: FlightData): Promise<boolean> {
-  try {
-    if (!data || !data.states || data.states.length === 0) {
-      return false;
-    }
+// Vercel storage functions
 
+export async function saveFlightDataToVercel(data: FlightData): Promise<boolean> {
+  if (!data || !data.states || data.states.length === 0) return false;
+
+  try {
     const response = await fetch('/api/flight-data', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        time: data.time,
-        states: data.states
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ time: data.time, states: data.states })
     });
 
-    if (response.ok) {
-      await response.json(); // Acknowledge response
-      console.log(`☁️ Saved ${data.states.length} aircraft to Vercel storage`);
+    const result = await response.json();
+
+    if (response.ok && result.success) {
+      // Check if data was actually persisted
+      if (result.persisted === false) {
+        console.warn('Vercel acknowledged data but did NOT persist (KV not configured)');
+        return false;
+      }
+      console.log(`Saved ${data.states.length} aircraft to Vercel storage`);
       return true;
-    } else {
-      console.warn('⚠️ Failed to save to Vercel:', response.status);
-      return false;
     }
-  } catch (error) {
-    console.warn('⚠️ Error saving to Vercel (non-critical):', error);
-    return false; // Don't throw - this is a background sync
+    return false;
+  } catch {
+    return false;
   }
 }
 
 export async function loadFlightDataFromVercel(): Promise<FlightData | null> {
   try {
-    // Only try once per session - cache the result
     const cacheKey = 'vercel_storage_checked';
-    if (sessionStorage.getItem(cacheKey)) {
-      return null; // Already checked this session
-    }
-    
-    const response = await fetch('/api/flight-data', {
-      cache: 'no-cache' // Force fresh check, but respect 304
-    });
-    
-    sessionStorage.setItem(cacheKey, 'true'); // Mark as checked
-    
-    if (!response.ok) {
-      return null;
-    }
+    if (sessionStorage.getItem(cacheKey)) return null;
+
+    const response = await fetch('/api/flight-data', { cache: 'no-cache' });
+    sessionStorage.setItem(cacheKey, 'true');
+
+    if (!response.ok) return null;
 
     const result = await response.json();
-    
     if (result.success && result.data && result.data.states && Array.isArray(result.data.states)) {
-      console.log(`☁️ Loaded ${result.data.states.length} aircraft from Vercel storage`);
+      console.log(`Loaded ${result.data.states.length} aircraft from Vercel storage`);
       return result.data;
     }
-    
     return null;
-  } catch (error) {
-    console.warn('⚠️ Could not load from Vercel:', error);
+  } catch {
     return null;
   }
 }
-

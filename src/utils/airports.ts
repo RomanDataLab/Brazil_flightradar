@@ -1,5 +1,6 @@
 // Airport data utilities
 // Data source: https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat
+// Cached in localStorage to avoid re-fetching stale data on every page load
 
 export interface Airport {
   id: number;
@@ -18,22 +19,39 @@ export interface Airport {
   source: string;
 }
 
+const CACHE_KEY = 'openflights_airports';
+const CACHE_TS_KEY = 'openflights_airports_ts';
+const CACHE_DURATION = 7 * 24 * 60 * 60 * 1000; // 7 days (data rarely changes)
+
 export async function fetchAirports(): Promise<Airport[]> {
+  // Try cache first
+  try {
+    const ts = localStorage.getItem(CACHE_TS_KEY);
+    if (ts && Date.now() - parseInt(ts, 10) < CACHE_DURATION) {
+      const cached = localStorage.getItem(CACHE_KEY);
+      if (cached) {
+        const airports = JSON.parse(cached) as Airport[];
+        console.log(`Loaded ${airports.length} Brazil airports from cache`);
+        return airports;
+      }
+    }
+  } catch {
+    // Cache miss, fetch fresh
+  }
+
   try {
     const response = await fetch('https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat');
     const text = await response.text();
-    
+
     const airports: Airport[] = [];
     const lines = text.split('\n');
-    
+
     for (const line of lines) {
       if (!line.trim()) continue;
-      
-      // Parse CSV line (handling quoted fields)
+
       const fields = parseCSVLine(line);
-      
       if (fields.length < 14) continue;
-      
+
       const airport: Airport = {
         id: parseInt(fields[0]) || 0,
         name: fields[1] || '',
@@ -50,17 +68,29 @@ export async function fetchAirports(): Promise<Airport[]> {
         type: fields[12] === '\\N' ? '' : fields[12] || '',
         source: fields[13] === '\\N' ? '' : fields[13] || ''
       };
-      
-      // Filter for Brazil airports
+
       if (airport.country === 'Brazil' && airport.latitude && airport.longitude) {
         airports.push(airport);
       }
     }
-    
-    console.log(`✅ Loaded ${airports.length} Brazil airports`);
+
+    // Cache the result
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(airports));
+      localStorage.setItem(CACHE_TS_KEY, Date.now().toString());
+    } catch {
+      // Storage full — non-critical
+    }
+
+    console.log(`Fetched ${airports.length} Brazil airports`);
     return airports;
   } catch (error) {
-    console.error('❌ Error fetching airports:', error);
+    console.error('Error fetching airports:', error);
+    // Try stale cache as fallback
+    try {
+      const cached = localStorage.getItem(CACHE_KEY);
+      if (cached) return JSON.parse(cached) as Airport[];
+    } catch {}
     return [];
   }
 }
@@ -69,10 +99,9 @@ function parseCSVLine(line: string): string[] {
   const fields: string[] = [];
   let current = '';
   let inQuotes = false;
-  
+
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
-    
     if (char === '"') {
       inQuotes = !inQuotes;
     } else if (char === ',' && !inQuotes) {
@@ -82,8 +111,7 @@ function parseCSVLine(line: string): string[] {
       current += char;
     }
   }
-  
+
   fields.push(current);
   return fields;
 }
-

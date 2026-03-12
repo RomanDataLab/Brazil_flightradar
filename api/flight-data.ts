@@ -92,6 +92,7 @@ export default async function handler(req: any, res: any) {
 
           return res.status(200).json({
             success: true,
+            persisted: true,
             message: `Saved ${states.length} aircraft states to Vercel KV`,
             timestamp: Date.now()
           });
@@ -105,10 +106,11 @@ export default async function handler(req: any, res: any) {
         }
       }
 
-      // Fallback: acknowledge but don't persist
+      // Fallback: tell client data was NOT persisted
       return res.status(200).json({
         success: true,
-        message: `Received ${states.length} aircraft states (KV not configured - data not persisted)`,
+        persisted: false,
+        message: `Received ${states.length} aircraft states but KV not configured - data NOT persisted`,
         timestamp: Date.now(),
         note: 'Install @vercel/kv and configure Vercel KV for persistent storage'
       });

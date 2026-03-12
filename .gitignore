@@ -43,5 +43,8 @@ credentials.json
 *.mp4
 1763649114411/
 
+# Local-only development copy
+loc/
+
 # Export helper (keep it)
 # export-flight-data.html

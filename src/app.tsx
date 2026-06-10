@@ -112,7 +112,17 @@ function ApiKeyModal({ onSubmit, onSkip }: { onSubmit: (u: string, p: string) =>
         </div>
         <p style={{ fontSize: 11, opacity: 0.5, margin: '16px 0 0', textAlign: 'center' }}>
           Credentials are only sent to the server proxy — never exposed in client code.
-          Register at opensky-network.org
+        </p>
+        <p style={{ fontSize: 12, opacity: 0.7, margin: '12px 0 0', textAlign: 'center' }}>
+          Don't have an account?{' '}
+          <a
+            href="https://opensky-network.org/index.php/login"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#4CAF50', textDecoration: 'underline' }}
+          >
+            Register for free at OpenSky Network
+          </a>
         </p>
       </div>
     </div>

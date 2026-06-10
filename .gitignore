@@ -46,5 +46,8 @@ credentials.json
 # Local-only development copy
 loc/
 
+# Project documentation (local only)
+graph.md
+
 # Export helper (keep it)
 # export-flight-data.html

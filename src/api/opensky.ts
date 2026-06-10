@@ -57,19 +57,32 @@ export async function fetchBrazilFlights(
   }
 
   const response = await fetch(url, { headers });
-  
+
   if (!response.ok) {
+    // Try to read error detail from proxy
+    let detail = '';
+    try {
+      const errBody = await response.json();
+      detail = errBody.detail || errBody.message || errBody.error || '';
+    } catch {}
+
     if (response.status === 429) {
       throw new Error('Rate limit exceeded (429). Please wait before retrying.');
     }
     if (response.status === 401) {
       throw new Error('Unauthorized (401). Check your credentials.');
     }
-    throw new Error(`HTTP error! status: ${response.status}`);
+    if (response.status === 504) {
+      throw new Error('OpenSky API timed out (504). The server is slow — will retry.');
+    }
+    if (response.status === 502) {
+      throw new Error(`Bad gateway (502). ${detail}`);
+    }
+    throw new Error(`HTTP error ${response.status}. ${detail}`);
   }
 
   const data = await response.json();
-  
+
   if (!data.states || !Array.isArray(data.states)) {
     throw new Error('Invalid response format from OpenSky API');
   }
